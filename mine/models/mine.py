@@ -25,7 +25,19 @@ EPS = 1e-6
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 #device = 'cpu'
 print("Device:", device)
+class T(nn.Module):
+    def __init__(self, x_dim, z_dim):
+        super().__init__()
+        self.layers = CustomSequential(ConcatLayer(), nn.Linear(x_dim + z_dim, 400),
+                                       nn.ReLU(),
+                                       nn.Linear(400, 400),
+                                       nn.ReLU(),
+                                       nn.Linear(400, 400),
+                                       nn.ReLU(),
+                                       nn.Linear(400, 1))
 
+    def forward(self, x, z):
+        return self.layers(x, z)
 
 class EMALoss(torch.autograd.Function):
     @staticmethod
@@ -127,21 +139,6 @@ class Mine(nn.Module):
         return final_mi
 
 
-class T(nn.Module):
-    def __init__(self, x_dim, z_dim):
-        super().__init__()
-        self.layers = CustomSequential(ConcatLayer(), nn.Linear(x_dim + z_dim, 400),
-                                       nn.ReLU(),
-                                       nn.Linear(400, 400),
-                                       nn.ReLU(),
-                                       nn.Linear(400, 400),
-                                       nn.ReLU(),
-                                       nn.Linear(400, 1))
-
-    def forward(self, x, z):
-        return self.layers(x, z)
-
-
 class MutualInformationEstimator(pl.LightningModule):
     def __init__(self, x_dim, z_dim, loss='mine', **kwargs):
         super().__init__()
@@ -229,98 +226,6 @@ def build_dist(rho):
     return dist
 
 
-def function_experiment():
-    N = 3000
-    lr = 1e-4
-    batch_size = 256
-    epochs = 200
-
-    def f1(x): return x
-    def f2(x): return x**3
-    def f3(x): return torch.sin(x)
-    sigmas = torch.linspace(0, 0.9, 10)
-    fs = [f1, f2, f3]
-    dim = 2
-
-    res = []
-    for sigma in sigmas:
-        for ix, f in enumerate(fs):
-            print(f"Experiment: {ix + 1}, Sigma: {sigma}...")
-
-            kwargs = {
-                'N': N,
-                'sigma': sigma,
-                'f': f,
-                'lr': lr,
-                'batch_size': batch_size
-            }
-
-            model = MutualInformationEstimator(
-                dim, dim, loss='mine', **kwargs).to(device)
-            trainer = Trainer(max_epochs=epochs,
-                              early_stop_callback=False, gpus=1)
-            trainer.fit(model)
-            trainer.test()
-
-            # Append result
-            res.append([ix, sigma, model.avg_test_mi])
-
-    res = np.array(res)
-    Z = res[:, -1].reshape((len(sigmas), len(fs))).T
-    plt.figure()
-    plt.imshow(Z, cmap='Blues')
-    plt.show()
-
-
-def rho_experiment():
-    dim = 20
-    N = 3000
-    lr = 1e-3
-    epochs = 100
-    batch_size = 128
-
-    x_dim = dim
-    z_dim = dim
-
-    steps = 20
-    rhos = np.linspace(-0.99, 0.99, steps)
-    res = []
-
-    # Rho Experiment
-    for rho in rhos:
-        train_loader = torch.utils.data.DataLoader(
-            MultivariateNormalDataset(N, dim, rho), batch_size=batch_size, shuffle=True)
-        test_loader = torch.utils.data.DataLoader(
-            MultivariateNormalDataset(N, dim, rho), batch_size=batch_size, shuffle=True)
-
-        true_mi = train_loader.dataset.true_mi
-
-        kwargs = {
-            'lr': lr,
-            'batch_size': batch_size,
-            'train_loader': train_loader,
-            'test_loader': test_loader,
-            'alpha': 1.0
-        }
-
-        model = MutualInformationEstimator(
-            dim, dim, loss='mine_biased', **kwargs).to(device)
-        trainer = Trainer(max_epochs=epochs, early_stop_callback=False, gpus=1)
-        trainer.fit(model)
-        trainer.test()
-
-        print("True_mi {}".format(true_mi))
-        print("MINE {}".format(model.avg_test_mi))
-        res.append((rho, model.avg_test_mi, true_mi))
-
-    res = np.array(res)
-    plt.figure()
-    plt.plot(res[:, 0], res[:, 1], label='MINE')
-    plt.plot(res[:, 0], res[:, 2], linestyle='--', label='True MI')
-    plt.legend()
-    plt.show()
-
-
 def gan_experiment():
 
     batch_size = 256
@@ -349,12 +254,9 @@ def gan_experiment():
     print_every = 100
 
     mi_model = T(output_dim, 1)
-
     mi_estimator = Mine(mi_model, loss='mine').to(device)
     opt_mi = torch.optim.Adam(mi_estimator.parameters(), lr=lr)
-
-    model = GAN(input_dim, output_dim, conditional_dim=1,
-                mi_estimator=mi_estimator, device=device, __lambda__=0.0).to(device)
+    model = GAN(input_dim, output_dim, conditional_dim=1,mi_estimator=mi_estimator, device=device, __lambda__=0.0).to(device)
 
     epochs = 100
     opt_g = torch.optim.Adam(model.parameters(), lr=lr)
@@ -366,10 +268,7 @@ def gan_experiment():
             if device == 'cuda':
                 label = label.float().cuda()
                 img = img.cuda()
-
-            d_loss, generator_loss = model.loss_fn(
-                img, opt_g, opt_d, opt_mi, conditional=label)
-
+            d_loss, generator_loss = model.loss_fn(img, opt_g, opt_d, opt_mi, conditional=label)
             if ix % print_every == 0:
                 prct = (ix + 2) * batch_size/(batch_size * len(train_loader))
                 print(
